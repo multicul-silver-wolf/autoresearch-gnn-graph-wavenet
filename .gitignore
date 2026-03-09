@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Environments
+.venv/
+.venv.pip.bak/
+
+# Runtime artifacts
+data/
+garage/
+
+# OS
+.DS_Store
