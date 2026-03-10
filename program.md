@@ -1,61 +1,153 @@
-# autoresearch-gnn program.md (v0.1)
+# autoresearch-gnn
 
-目标：在 **Graph-WaveNet + METR-LA** 上执行可复现的自动实验循环，稳定降低 `Valid Loss (MAE)`。
+This is an experiment to have the LLM do its own research on **Graph-WaveNet + METR-LA**.
 
-## 0) 研究约束（必须遵守）
+## Setup
 
-1. **主指标**：`Valid Loss (MAE)`（越低越好）。
-2. **接受阈值**：相对当前 best 至少提升 `0.5%` 才接受。
-3. **预算固定**：每次 trial 固定相同 `epochs`（默认 1，可调）。
-4. **数据固定**：仅使用 `data/METR-LA`（train/val/test）。
-5. **可复现**：每次实验写入 `experiments/ledger.jsonl`，并保存完整日志。
-6. **安全边界**：禁止删除数据、禁止改动数据路径，禁止修改非白名单文件。
+To set up a new experiment, work with the user to:
 
-## 1) 白名单（v0.1）
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar10`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
+2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current main/master commit.
+3. **Read the in-scope files** (full context first):
+   - `README.md` — repository context.
+   - `program.md` — this operating protocol.
+   - `train.py` — training/eval entry and metric printing.
+   - `model.py` — Graph-WaveNet architecture.
+   - `engine.py` — trainer implementation.
+   - `orchestrator.py` — automated trial runner and decision loop.
+4. **Verify data exists**:
+   - `data/METR-LA/{train,val,test}.npz`
+   - `data/sensor_graph/adj_mx.pkl`
+   If missing, run data prep first.
+5. **Initialize logging**:
+   - `experiments/results.tsv` (human-readable)
+   - `experiments/ledger.jsonl` (machine-readable)
+6. **Confirm and go**: setup should be reproducible before starting autonomous trials.
 
-v0.1 先做“低风险自动实验”，仅通过训练参数搜索，不自动改代码：
-- `--nhid`
-- `--dropout`
-- `--learning_rate`
-- `--weight_decay`
-- `--batch_size`
-- `--gcn_bool`
-- `--addaptadj`
-- `--randomadj`
-- `--adjtype`
+---
 
-> 说明：后续 v0.2 再开启对 `model.py` 的受控改动。
+## Experimentation
 
-## 2) 决策规则
+Each trial must run under a **fixed wall-clock budget** so results are comparable.
 
-- trial 失败（超时/报错/缺指标） => `reject`
-- trial 成功但 `valid_loss` 未超过阈值 => `reject`
-- trial 成功且 `valid_loss` 提升超过阈值 => `accept + 更新 best`
+### Budget rule (critical)
 
-## 3) 实验账本格式（JSONL）
+- Use `time_budget_sec` as the fixed trial budget (default: `1200` seconds).
+- Training must stop near budget and still produce **valid validation/test metrics**.
+- `eval_reserve_sec` is reserved for validation/testing tail work.
 
-每行一个 JSON 对象，包含：
-- `trial_id`
-- `timestamp`
-- `config`
-- `duration_sec`
-- `status` (`ok`/`error`/`timeout`)
-- `metrics` (`valid_loss`, `test_mae`, `test_mape`, `test_rmse`)
-- `decision` (`accept`/`reject`)
-- `reason`
-- `log_path`
+### Primary metric
 
-## 4) 推荐运行方式
+- **Goal: minimize `Valid Loss (MAE)`**.
+- Auxiliary metrics for reporting: `Test MAE`, `Test MAPE`, `Test RMSE`.
+
+### What you CAN do
+
+- In `hyper` mode: tune allowed training flags (nhid/dropout/lr/weight_decay/batch_size/graph flags).
+- In `code` mode: mutate only allowlisted files, then commit and test.
+
+### What you CANNOT do
+
+- Do not modify dataset files or data paths.
+- Do not modify files outside allowlist in autonomous code mode.
+- Do not disable logging, rollback, or metric parsing.
+
+### Allowlist (code mode)
+
+- `train.py`
+- `model.py`
+
+(If you need broader edits, require explicit human approval.)
+
+---
+
+## Output format (from train logs)
+
+Training logs should include these parseable lines:
+
+- `Valid Loss: ...`
+- `On average over 12 horizons, Test MAE: ..., Test MAPE: ..., Test RMSE: ...`
+
+If these lines are missing, mark the trial as failed.
+
+---
+
+## Logging results
+
+### 1) `experiments/results.tsv` (tab-separated)
+
+Header:
+
+```tsv
+commit	valid_loss	test_mae	test_mape	test_rmse	duration_sec	status	decision	description
+```
+
+- `commit`: git short hash after keep/discard handling
+- `status`: `ok` / `error` / `timeout`
+- `decision`: `accept` / `reject`
+
+### 2) `experiments/ledger.jsonl`
+
+One JSON object per trial with full traceability, including:
+
+- trial id / timestamp
+- commit before/run/after
+- config
+- duration/status
+- parsed metrics
+- decision/reason
+- current best snapshot
+
+---
+
+## Decision policy
+
+- First successful trial => baseline (`accept`).
+- Later trial is `accept` only if relative improvement over best is >= threshold (default `0.5%`).
+- Else `reject`.
+- In `code` mode:
+  - `accept` => keep commit and advance branch.
+  - `reject` => rollback with `git reset --hard <pre_commit>`.
+
+---
+
+## The experiment loop
+
+For each trial:
+
+1. Record `pre_commit`.
+2. (Code mode only) mutate allowlisted files and commit.
+3. Run one budgeted trial.
+4. Parse metrics from log.
+5. Decide `accept/reject` by threshold.
+6. If code mode and reject: rollback to `pre_commit`.
+7. Append both `results.tsv` and `ledger.jsonl`.
+8. Move to next trial.
+
+If a trial crashes/timeouts/has missing metrics, treat as failed (`reject`) and continue.
+
+---
+
+## Recommended commands
+
+### Hyperparameter mode (safe default)
 
 ```bash
 source .venv/bin/activate
-python orchestrator.py --trials 10 --epochs 1 --device cpu
+python orchestrator.py --mode hyper --trials 10 --time_budget_sec 1200 --device cpu
 ```
 
-如要提速，可在有 GPU 时改为 `--device cuda:0`。
+### Code-evolution mode (Karpathy-style keep/discard)
 
-## 5) 成功定义（v0.1）
+```bash
+source .venv/bin/activate
+python orchestrator.py --mode code --trials 10 --time_budget_sec 1200 --device cpu --mutator_cmd "<your mutator command>"
+```
 
-- 能连续自动跑完 N 个 trial
-- 账本与日志完整
-- 至少产出一个比 baseline 更优的配置（或明确得出“当前搜索空间无改进”）
+---
+
+## Stop conditions
+
+- Stop immediately if human asks to stop.
+- Stop if repository/data integrity is at risk.
+- Otherwise continue autonomous loop for requested trial count.

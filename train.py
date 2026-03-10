@@ -25,6 +25,9 @@ parser.add_argument('--dropout',type=float,default=0.3,help='dropout rate')
 parser.add_argument('--weight_decay',type=float,default=0.0001,help='weight decay rate')
 parser.add_argument('--epochs',type=int,default=100,help='')
 parser.add_argument('--print_every',type=int,default=50,help='')
+parser.add_argument('--time_budget_sec',type=float,default=0,help='wall-clock budget for training loop; <=0 disables')
+parser.add_argument('--eval_reserve_sec',type=float,default=180,help='reserve seconds for validation/testing when time budget is enabled')
+parser.add_argument('--min_train_iters',type=int,default=1,help='minimum train iterations before budget stop can trigger')
 #parser.add_argument('--seed',type=int,default=99,help='random seed')
 parser.add_argument('--save',type=str,default='./garage/metr',help='save path')
 parser.add_argument('--expid',type=int,default=1,help='experiment id')
@@ -66,6 +69,10 @@ def main():
     his_loss =[]
     val_time = []
     train_time = []
+    train_start = time.time()
+    total_train_iters = 0
+    budget_triggered = False
+
     for i in range(1,args.epochs+1):
         #if i % 10 == 0:
             #lr = max(0.000002,args.learning_rate * (0.1 ** (i // 10)))
@@ -76,7 +83,16 @@ def main():
         train_rmse = []
         t1 = time.time()
         dataloader['train_loader'].shuffle()
+
         for iter, (x, y) in enumerate(dataloader['train_loader'].get_iterator()):
+            if args.time_budget_sec > 0:
+                elapsed = time.time() - train_start
+                train_cutoff = max(args.time_budget_sec - args.eval_reserve_sec, 0)
+                if elapsed >= train_cutoff and total_train_iters >= args.min_train_iters:
+                    budget_triggered = True
+                    print(f"[budget] stop training loop at epoch={i}, iter={iter}, elapsed={elapsed:.2f}s (train_cutoff={train_cutoff:.2f}s)", flush=True)
+                    break
+
             trainx = torch.Tensor(x).to(device)
             trainx= trainx.transpose(1, 3)
             trainy = torch.Tensor(y).to(device)
@@ -85,9 +101,11 @@ def main():
             train_loss.append(metrics[0])
             train_mape.append(metrics[1])
             train_rmse.append(metrics[2])
+            total_train_iters += 1
             if iter % args.print_every == 0 :
                 log = 'Iter: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}'
                 print(log.format(iter, train_loss[-1], train_mape[-1], train_rmse[-1]),flush=True)
+
         t2 = time.time()
         train_time.append(t2-t1)
         #validation
@@ -110,9 +128,10 @@ def main():
         log = 'Epoch: {:03d}, Inference Time: {:.4f} secs'
         print(log.format(i,(s2-s1)))
         val_time.append(s2-s1)
-        mtrain_loss = np.mean(train_loss)
-        mtrain_mape = np.mean(train_mape)
-        mtrain_rmse = np.mean(train_rmse)
+
+        mtrain_loss = np.mean(train_loss) if len(train_loss) > 0 else float('nan')
+        mtrain_mape = np.mean(train_mape) if len(train_mape) > 0 else float('nan')
+        mtrain_rmse = np.mean(train_rmse) if len(train_rmse) > 0 else float('nan')
 
         mvalid_loss = np.mean(valid_loss)
         mvalid_mape = np.mean(valid_mape)
@@ -122,6 +141,11 @@ def main():
         log = 'Epoch: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, Valid Loss: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, Training Time: {:.4f}/epoch'
         print(log.format(i, mtrain_loss, mtrain_mape, mtrain_rmse, mvalid_loss, mvalid_mape, mvalid_rmse, (t2 - t1)),flush=True)
         torch.save(engine.model.state_dict(), args.save+"_epoch_"+str(i)+"_"+str(round(mvalid_loss,2))+".pth")
+
+        if budget_triggered:
+            print(f"[budget] reached target budget (time_budget_sec={args.time_budget_sec}), finish after epoch-level validation.", flush=True)
+            break
+
     print("Average Training Time: {:.4f} secs/epoch".format(np.mean(train_time)))
     print("Average Inference Time: {:.4f} secs".format(np.mean(val_time)))
 

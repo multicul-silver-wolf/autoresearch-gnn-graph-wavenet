@@ -9,6 +9,8 @@ __pycache__/
 # Runtime artifacts
 data/
 garage/
+experiments/logs/
+experiments/results.tsv
 
 # OS
 .DS_Store
